@@ -1,6 +1,5 @@
 # This workflows will upload a Python Package using Twine when a release is created
 # For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions#publishing-to-package-registries
-
 name: tests
 
 on:
@@ -16,39 +15,71 @@ on:
       - npe2
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build_sdist:
+  test:
+    name: ${{ matrix.platform }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: "true"
+      - name: Install Windows OpenGL
+        uses: pyvista/setup-headless-display-action@v4.2
+        with:
+          qt: true
+          wm: herbstluftwm
+
+
+      # note: if you need dependencies from conda, considering using
+      # setup-miniconda: https://github.com/conda-incubator/setup-miniconda
+      # and
+      # tox-conda: https://github.com/tox-dev/tox-conda
+      # this runs the platform-specific tests declared in tox.ini
+      - name: Test with tox
+        run: uvx --with tox-gh-actions tox
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
+      - name: Coverage
+        uses: codecov/codecov-action@v5
+
+  build-and-inspect-package:
+    name: Build & inspect package.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hynek/build-and-inspect-python-package@v2
+
+  deploy:
     # this will run when you have tagged a commit, starting with "v*"
     # and requires that you have put your twine API key in your
     # github secrets (see readme for details)
-    name: Build source distribution
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build-and-inspect-package]
     runs-on: ubuntu-latest
+    if: contains(github.ref, 'tags')
+    permissions:
+      id-token: write
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Build sdist
-        run: pipx run build --sdist
-
-      - uses: actions/upload-artifact@v4
+      - name: Download built artifact to dist/
+        uses: actions/download-artifact@v5
         with:
-          path: dist/*.tar.gz
-  upload_pypi:
-    needs: [build_sdist]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    # upload to PyPI on every tag starting with 'v'
-    # alternatively, to publish when a GitHub Release is created, use the following rule:
-    # if: github.event_name == 'release' && github.event.action == 'published'
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          # unpacks default artifact into dist/
-          # if `name: artifact` is omitted, the action will create extra parent dir
-          name: artifact
+          name: Packages
           path: dist
-
-      - uses: pypa/gh-action-pypi-publish@v1.5.0
-        with:
-          password: ${{ secrets.TWINE_API_KEY }}
-          # To test: repository_url: https://test.pypi.org/legacy/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
